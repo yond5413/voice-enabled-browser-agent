@@ -22,7 +22,7 @@ export const parseIntent = async (transcript: string, apiKey: string | undefined
         'X-Title': 'Project Aria Voice Agent'
       },
       body: JSON.stringify({
-        model: 'google/gemini-pro', // Or any other suitable model
+        model: 'deepseek/deepseek-chat-v3.1:free', 
         messages: [{
           role: 'user',
           content: `Convert the following voice command into a structured browser action. The command is: "${transcript}". Respond ONLY with a valid JSON object matching this format: {action: "navigate|click|type|extract", target: "<CSS_SELECTOR_OR_URL>", value?: "<string_to_type>"}`

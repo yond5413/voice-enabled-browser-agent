@@ -10,8 +10,9 @@ import { ActionLog } from '@/types'
 export default function Home() {
   const [actionLogs, setActionLogs] = useState<ActionLog[]>([])
   const [isProcessing, setIsProcessing] = useState(false)
+  const [recordingMode, setRecordingMode] = useState<'push-to-talk' | 'continuous'>('continuous')
 
-  const openRouterApiKey = process.env.OPENROUTER_API_KEY;
+  const openRouterApiKey = process.env.NEXT_PUBLIC_OPENROUTER_API_KEY;
 
   const handleTranscription = useCallback(async (transcript: string) => {
     if (!transcript.trim()) return;
@@ -20,6 +21,10 @@ export default function Home() {
     setIsProcessing(true);
 
     try {
+      if (!openRouterApiKey) {
+        throw new Error('OpenRouter API key not configured. Please add NEXT_PUBLIC_OPENROUTER_API_KEY to your .env.local file.');
+      }
+
       const intent = await parseIntent(transcript, openRouterApiKey);
       updateActionLog(logId, { action: intent, result: 'Executing action...' });
 
@@ -27,7 +32,18 @@ export default function Home() {
       updateActionLog(logId, { status: 'success', result });
     } catch (error: any) {
       console.error('Error in voice processing pipeline:', error);
-      updateActionLog(logId, { status: 'error', result: error.message || 'An unknown error occurred.' });
+      let errorMessage = error.message || 'An unknown error occurred.';
+      
+      // Provide more user-friendly error messages
+      if (error.message?.includes('API key')) {
+        errorMessage = 'API configuration error. Please check your environment variables.';
+      } else if (error.message?.includes('model')) {
+        errorMessage = 'AI model error. Please try again or contact support.';
+      } else if (error.message?.includes('network')) {
+        errorMessage = 'Network error. Please check your internet connection.';
+      }
+      
+      updateActionLog(logId, { status: 'error', result: errorMessage });
     } finally {
       setIsProcessing(false);
     }
@@ -39,7 +55,12 @@ export default function Home() {
     stopRecording,
     interimTranscript,
     finalTranscript,
-  } = useDeepgram(handleTranscription);
+    recordingDuration,
+  } = useDeepgram(handleTranscription, {
+    maxRecordingDuration: recordingMode === 'push-to-talk' ? 30000 : 120000, // 30s for push-to-talk, 2min for continuous
+    autoStopOnSilence: recordingMode === 'push-to-talk', 
+    silenceThreshold: recordingMode === 'push-to-talk' ? 2000 : 4000, // Shorter silence for push-to-talk
+  });
 
   const addActionLog = useCallback((logData: Partial<ActionLog> & { command: string }) => {
     const newLog: ActionLog = {
@@ -66,6 +87,18 @@ export default function Home() {
 
   const clearLogs = () => {
     setActionLogs([]);
+  };
+
+  const formatDuration = (durationMs: number) => {
+    const seconds = Math.floor(durationMs / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds % 60;
+    return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+  };
+
+  const getProgressPercentage = () => {
+    const maxDuration = recordingMode === 'push-to-talk' ? 30000 : 120000;
+    return Math.min((recordingDuration / maxDuration) * 100, 100);
   };
 
   const getStatusColor = (status: ActionLog['status']) => {
@@ -103,7 +136,34 @@ export default function Home() {
 
         <div className="bg-white rounded-2xl shadow-xl p-8 mb-8 border border-gray-200">
           <div className="text-center">
+            {/* Recording Mode Toggle */}
             <div className="mb-6">
+              <div className="flex items-center justify-center mb-4">
+                <div className="flex bg-gray-100 rounded-lg p-1">
+                  <button
+                    onClick={() => setRecordingMode('continuous')}
+                    disabled={isRecording}
+                    className={`px-4 py-2 text-sm rounded-md transition-all ${
+                      recordingMode === 'continuous'
+                        ? 'bg-white text-blue-600 shadow-sm'
+                        : 'text-gray-600 hover:text-blue-600'
+                    } ${isRecording ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  >
+                    Continuous (2 min)
+                  </button>
+                  <button
+                    onClick={() => setRecordingMode('push-to-talk')}
+                    disabled={isRecording}
+                    className={`px-4 py-2 text-sm rounded-md transition-all ${
+                      recordingMode === 'push-to-talk'
+                        ? 'bg-white text-blue-600 shadow-sm'
+                        : 'text-gray-600 hover:text-blue-600'
+                    } ${isRecording ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  >
+                    Push-to-Talk (30s)
+                  </button>
+                </div>
+              </div>
               <button
                 onClick={toggleRecording}
                 disabled={isProcessing}
@@ -112,10 +172,35 @@ export default function Home() {
               </button>
             </div>
 
-            <div className="h-10">
-              {isRecording && <p className="text-red-600 font-medium animate-pulse">🎤 Recording...</p>}
+            <div className="h-16">
+              {isRecording && (
+                <div className="space-y-2">
+                  <p className="text-red-600 font-medium animate-pulse flex items-center justify-center">
+                    🎤 Recording... {formatDuration(recordingDuration)}
+                  </p>
+                  <div className="w-64 mx-auto bg-gray-200 rounded-full h-2">
+                    <div 
+                      className="bg-red-500 h-2 rounded-full transition-all duration-100"
+                      style={{ width: `${getProgressPercentage()}%` }}
+                    ></div>
+                  </div>
+                  <p className="text-xs text-gray-500">
+                    Max {recordingMode === 'push-to-talk' ? '0:30' : '2:00'} {recordingMode === 'push-to-talk' ? 'seconds' : 'minutes'}
+                  </p>
+                </div>
+              )}
               {isProcessing && <p className="text-blue-600 font-medium"><Activity className="inline h-4 w-4 animate-spin mr-2" />Processing your command...</p>}
-              {!isRecording && !isProcessing && <p className="text-gray-600">Click the microphone to start recording</p>}
+              {!isRecording && !isProcessing && (
+                <div className="space-y-1">
+                  <p className="text-gray-600">Click the microphone to start recording</p>
+                  <p className="text-xs text-gray-400">
+                    {recordingMode === 'continuous' 
+                      ? 'Continuous: 2min max • Pause-friendly • Natural speech patterns'
+                      : 'Push-to-talk: 30s max • Auto-stops on 2s silence'
+                    }
+                  </p>
+                </div>
+              )}
             </div>
 
             {(finalTranscript || interimTranscript) && (
@@ -171,15 +256,30 @@ export default function Home() {
           </div>
         </div>
 
-        <div className="mt-8 bg-yellow-50 border border-yellow-200 rounded-lg p-6">
-          <h3 className="font-semibold text-yellow-800 mb-3 flex items-center"><Zap className="h-4 w-4 mr-2" />Try these voice commands:</h3>
-          <ul className="list-disc list-inside text-yellow-700 text-sm space-y-1">
-            <li>"Go to wikipedia.org"</li>
-            <li>"Click on the English link"</li>
-            <li>"Type 'artificial intelligence' in the search box"</li>
-            <li>"Click the search button"</li>
-            <li>"Extract the main heading"</li>
-          </ul>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-8">
+          <div className="bg-green-50 border border-green-200 rounded-lg p-6">
+            <h3 className="font-semibold text-green-800 mb-3 flex items-center">
+              <Zap className="h-4 w-4 mr-2" />Enhanced Speech Recognition
+            </h3>
+            <ul className="list-disc list-inside text-green-700 text-sm space-y-2">
+              <li><strong>🎯 Pause-Friendly:</strong> Natural speech pauses won't stop recording</li>
+              <li><strong>⏱️ Extended Duration:</strong> Up to 2 minutes continuous recording</li>
+              <li><strong>🔄 Smart Reconnection:</strong> Automatic keep-alive during long pauses</li>
+              <li><strong>🎙️ Two Modes:</strong> Continuous & Push-to-Talk options</li>
+            </ul>
+          </div>
+
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-6">
+            <h3 className="font-semibold text-blue-800 mb-3 flex items-center">
+              <Mic className="h-4 w-4 mr-2" />Try these complex commands:
+            </h3>
+            <ul className="list-disc list-inside text-blue-700 text-sm space-y-2">
+              <li>"Go to Wikipedia... <em>(pause to think)</em> ...and search for machine learning"</li>
+              <li>"Navigate to YouTube, find a tutorial about... <em>(pause)</em> ...React development"</li>
+              <li>"Please open Google and... <em>(long pause)</em> ...search for today's weather forecast"</li>
+              <li>"I want to go to Amazon... <em>(thinking pause)</em> ...and look for programming books"</li>
+            </ul>
+          </div>
         </div>
       </div>
     </div>
