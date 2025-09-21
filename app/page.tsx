@@ -1,25 +1,45 @@
 'use client'
 
-import { useState, useRef, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { Mic, MicOff, Activity, History, Zap } from 'lucide-react'
 import { useDeepgram } from '@/hooks/useDeepgram'
 import { parseIntent } from '@/utils/intentParser'
 import { executeBrowserAction } from '@/utils/stagehandActions'
-import { ActionLog, BrowserAction } from '@/types'
+import { ActionLog } from '@/types'
 
 export default function Home() {
-  const [isRecording, setIsRecording] = useState(false)
-  const [transcript, setTranscript] = useState('')
   const [actionLogs, setActionLogs] = useState<ActionLog[]>([])
   const [isProcessing, setIsProcessing] = useState(false)
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
-  const streamRef = useRef<MediaStream | null>(null)
 
-  // Get API keys from environment variables
-  const deepgramApiKey = process.env.NEXT_PUBLIC_DEEPGRAM_API_KEY;
-  const openRouterApiKey = process.env.NEXT_PUBLIC_OPENROUTER_API_KEY;
+  const openRouterApiKey = process.env.OPENROUTER_API_KEY;
 
-  const { transcribe } = useDeepgram(deepgramApiKey);
+  const handleTranscription = useCallback(async (transcript: string) => {
+    if (!transcript.trim()) return;
+
+    const logId = addActionLog({ command: transcript, status: 'processing', result: 'Parsing intent...' });
+    setIsProcessing(true);
+
+    try {
+      const intent = await parseIntent(transcript, openRouterApiKey);
+      updateActionLog(logId, { action: intent, result: 'Executing action...' });
+
+      const result = await executeBrowserAction(intent);
+      updateActionLog(logId, { status: 'success', result });
+    } catch (error: any) {
+      console.error('Error in voice processing pipeline:', error);
+      updateActionLog(logId, { status: 'error', result: error.message || 'An unknown error occurred.' });
+    } finally {
+      setIsProcessing(false);
+    }
+  }, [openRouterApiKey]);
+
+  const { 
+    isRecording,
+    startRecording,
+    stopRecording,
+    interimTranscript,
+    finalTranscript,
+  } = useDeepgram(handleTranscription);
 
   const addActionLog = useCallback((logData: Partial<ActionLog> & { command: string }) => {
     const newLog: ActionLog = {
@@ -36,88 +56,16 @@ export default function Home() {
     setActionLogs(prev => prev.map(log => log.id === id ? { ...log, ...updates } : log));
   }, []);
 
-  const startRecording = async () => {
-    try {
-      setIsRecording(true);
-      setTranscript('');
-      setIsProcessing(false);
-
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          sampleRate: 16000,
-          sampleSize: 16,
-          echoCancellation: true,
-          noiseSuppression: true
-        }
-      });
-
-      streamRef.current = stream;
-      const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
-      mediaRecorderRef.current = mediaRecorder;
-
-      const audioChunks: Blob[] = [];
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) audioChunks.push(event.data);
-      };
-
-      mediaRecorder.onstop = async () => {
-        setIsProcessing(true);
-        const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
-        const logId = addActionLog({ command: 'Recording finished. Transcribing...' });
-
-        try {
-          const transcribedText = await transcribe(audioBlob);
-          setTranscript(transcribedText);
-          updateActionLog(logId, { command: transcribedText, status: 'processing' });
-
-          if (!transcribedText.trim()) {
-            updateActionLog(logId, { status: 'error', result: 'Empty transcript.' });
-            setIsProcessing(false);
-            return;
-          }
-
-          updateActionLog(logId, { result: 'Parsing intent...' });
-          const intent = await parseIntent(transcribedText, openRouterApiKey);
-          updateActionLog(logId, { action: intent, result: 'Executing action...' });
-
-          const result = await executeBrowserAction(intent);
-          updateActionLog(logId, { status: 'success', result });
-
-        } catch (error: any) {
-          console.error('Error in voice processing pipeline:', error);
-          updateActionLog(logId, { status: 'error', result: error.message || 'An unknown error occurred.' });
-        } finally {
-          setIsProcessing(false);
-          if (streamRef.current) {
-            streamRef.current.getTracks().forEach(track => track.stop());
-            streamRef.current = null;
-          }
-        }
-      };
-
-      mediaRecorder.start();
-      setTimeout(() => {
-        if (mediaRecorderRef.current?.state === 'recording') stopRecording();
-      }, 5000);
-
-    } catch (error) {
-      console.error('Error starting recording:', error);
-      setIsRecording(false);
-      addActionLog({ command: 'Microphone access denied', status: 'error', result: 'Please allow microphone access to use voice commands' });
-    }
-  };
-
-  const stopRecording = () => {
-    if (mediaRecorderRef.current?.state === 'recording') {
-      mediaRecorderRef.current.stop();
-      setIsRecording(false);
+  const toggleRecording = () => {
+    if (isRecording) {
+      stopRecording();
+    } else {
+      startRecording();
     }
   };
 
   const clearLogs = () => {
     setActionLogs([]);
-    setTranscript('');
   };
 
   const getStatusColor = (status: ActionLog['status']) => {
@@ -157,7 +105,7 @@ export default function Home() {
           <div className="text-center">
             <div className="mb-6">
               <button
-                onClick={isRecording ? stopRecording : startRecording}
+                onClick={toggleRecording}
                 disabled={isProcessing}
                 className={`relative w-24 h-24 rounded-full font-bold text-white shadow-lg transition-all transform hover:scale-105 active:scale-95 disabled:opacity-50 disabled:transform-none ${isRecording ? 'bg-red-500 hover:bg-red-600 recording-pulse' : 'bg-primary hover:bg-primary/90'}`}>
                 {isRecording ? <MicOff className="h-8 w-8 mx-auto" /> : <Mic className="h-8 w-8 mx-auto" />}
@@ -165,15 +113,18 @@ export default function Home() {
             </div>
 
             <div className="h-10">
-              {isRecording && <p className="text-red-600 font-medium animate-pulse">🎤 Recording... (Auto-stop in 5s)</p>}
+              {isRecording && <p className="text-red-600 font-medium animate-pulse">🎤 Recording...</p>}
               {isProcessing && <p className="text-blue-600 font-medium"><Activity className="inline h-4 w-4 animate-spin mr-2" />Processing your command...</p>}
               {!isRecording && !isProcessing && <p className="text-gray-600">Click the microphone to start recording</p>}
             </div>
 
-            {transcript && (
+            {(finalTranscript || interimTranscript) && (
               <div className="mt-6 p-4 bg-blue-50 rounded-lg border border-blue-200">
-                <p className="text-sm font-semibold text-blue-800 mb-2">Latest Transcript:</p>
-                <p className="text-blue-700 text-lg">"{transcript}"</p>
+                <p className="text-sm font-semibold text-blue-800 mb-2">Transcript:</p>
+                <p className="text-blue-700 text-lg">
+                  {finalTranscript}
+                  {interimTranscript && <span className="text-gray-500">{interimTranscript}</span>}
+                </p>
               </div>
             )}
           </div>

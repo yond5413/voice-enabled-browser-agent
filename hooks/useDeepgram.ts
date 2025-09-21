@@ -1,38 +1,117 @@
 'use client'
 
-import { createClient } from '@deepgram/sdk'
-import { useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 
-// As per the PRD, this hook interacts directly with Deepgram from the client-side.
-// For production applications, it's recommended to proxy this through a server-side API route 
-// to keep the API key secure.
+export const useDeepgram = (onTranscription: (transcript: string) => void) => {
+  const [isRecording, setIsRecording] = useState(false)
+  const [interimTranscript, setInterimTranscript] = useState('')
+  const [finalTranscript, setFinalTranscript] = useState('')
 
-export const useDeepgram = (apiKey: string | undefined) => {
+  const socketRef = useRef<WebSocket | null>(null)
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+  const onTranscriptionRef = useRef(onTranscription);
 
-  const transcribe = useCallback(async (audioBlob: Blob): Promise<string> => {
-    if (!apiKey) {
-      console.error('Deepgram API key is not set.');
-      return 'Error: Deepgram API key not configured.';
+  useEffect(() => {
+    onTranscriptionRef.current = onTranscription;
+  }, [onTranscription]);
+
+  const deepgramApiKey = process.env.DEEPGRAM_API_KEY;
+
+  const startRecording = useCallback(async () => {
+    if (!deepgramApiKey) {
+      console.error("Deepgram API key is not defined. Make sure you have a NEXT_PUBLIC_DEEPGRAM_API_KEY in your .env.local file.")
+      return
     }
 
-    const deepgram = createClient(apiKey);
     try {
-      const { result, error } = await deepgram.listen.prerecorded.transcribeFile(
-        audioBlob,
-        { model: 'nova-2', punctuate: true, diarize: false }
-      );
+      const socket = new WebSocket('wss://api.deepgram.com/v1/listen?model=nova-3', [
+        'token',
+        deepgramApiKey
+      ])
+      socketRef.current = socket
 
-      if (error) {
-        console.error('Deepgram transcription error:', error);
-        return `Error: ${error.message}`;
+      socket.onopen = async () => {
+        console.log('Deepgram WebSocket connected.');
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        streamRef.current = stream;
+        const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+        mediaRecorderRef.current = mediaRecorder;
+
+        mediaRecorder.addEventListener('dataavailable', (event) => {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(event.data);
+          }
+        });
+
+        mediaRecorder.start(250);
+        setIsRecording(true);
+        setInterimTranscript('');
+        setFinalTranscript('');
       }
 
-      return result?.results.channels[0].alternatives[0].transcript || '';
-    } catch (e: any) {
-      console.error('An exception occurred during transcription:', e);
-      return `Error: ${e.message || 'Unknown transcription error'}`;
+      socket.onmessage = (message) => {
+        const received = JSON.parse(message.data);
+        const transcript = received.channel.alternatives[0]?.transcript;
+        
+        if (transcript) {
+          if (received.is_final) {
+            setFinalTranscript(prev => {
+              const newFinal = (prev ? prev + ' ' : '') + transcript;
+              onTranscriptionRef.current(newFinal);
+              return newFinal;
+            });
+            setInterimTranscript('');
+          } else {
+            setInterimTranscript(transcript);
+          }
+        }
+      }
+
+      socket.onclose = () => {
+        console.log('Deepgram WebSocket closed.');
+        setIsRecording(false);
+        if (mediaRecorderRef.current) {
+          mediaRecorderRef.current.stop();
+          mediaRecorderRef.current = null;
+        }
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach(track => track.stop());
+          streamRef.current = null;
+        }
+      }
+
+      socket.onerror = (error) => {
+        console.error('Deepgram WebSocket error:', error);
+        setIsRecording(false);
+      }
+
+    } catch (error) {
+      console.error('Error starting recording or connecting to Deepgram:', error);
+      setIsRecording(false);
     }
-  }, [apiKey]);
-  
-  return { transcribe };
-};
+  }, [deepgramApiKey]);
+
+  const stopRecording = useCallback(() => {
+    if (mediaRecorderRef.current?.state === 'recording') {
+      mediaRecorderRef.current.stop();
+    }
+    if (socketRef.current?.readyState === WebSocket.OPEN) {
+      socketRef.current.close();
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      stopRecording();
+    }
+  }, [stopRecording]);
+
+  return {
+    isRecording,
+    startRecording,
+    stopRecording,
+    interimTranscript,
+    finalTranscript,
+  }
+}
