@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useEffect } from 'react'
 import { Mic, MicOff, Activity, History, Zap } from 'lucide-react'
-import { useDeepgram } from '@/hooks/useDeepgram'
+import { usePreRecordedTranscription } from '@/hooks/usePreRecordedTranscription'
 import { parseIntent } from '@/utils/intentParser'
 import { executeBrowserAction } from '@/utils/stagehandActions'
 import { ActionLog } from '@/types'
@@ -10,7 +10,6 @@ import { ActionLog } from '@/types'
 export default function Home() {
   const [actionLogs, setActionLogs] = useState<ActionLog[]>([])
   const [isProcessing, setIsProcessing] = useState(false)
-  const [recordingMode, setRecordingMode] = useState<'push-to-talk' | 'continuous'>('continuous')
 
   const openRouterApiKey = process.env.NEXT_PUBLIC_OPENROUTER_API_KEY;
 
@@ -53,14 +52,7 @@ export default function Home() {
     isRecording,
     startRecording,
     stopRecording,
-    interimTranscript,
-    finalTranscript,
-    recordingDuration,
-  } = useDeepgram(handleTranscription, {
-    maxRecordingDuration: recordingMode === 'push-to-talk' ? 30000 : 120000, // 30s for push-to-talk, 2min for continuous
-    autoStopOnSilence: recordingMode === 'push-to-talk', 
-    silenceThreshold: recordingMode === 'push-to-talk' ? 2000 : 4000, // Shorter silence for push-to-talk
-  });
+  } = usePreRecordedTranscription({ onTranscription: handleTranscription });
 
   const addActionLog = useCallback((logData: Partial<ActionLog> & { command: string }) => {
     const newLog: ActionLog = {
@@ -89,17 +81,6 @@ export default function Home() {
     setActionLogs([]);
   };
 
-  const formatDuration = (durationMs: number) => {
-    const seconds = Math.floor(durationMs / 1000);
-    const minutes = Math.floor(seconds / 60);
-    const remainingSeconds = seconds % 60;
-    return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
-  };
-
-  const getProgressPercentage = () => {
-    const maxDuration = recordingMode === 'push-to-talk' ? 30000 : 120000;
-    return Math.min((recordingDuration / maxDuration) * 100, 100);
-  };
 
   const getStatusColor = (status: ActionLog['status']) => {
     switch (status) {
@@ -136,82 +117,17 @@ export default function Home() {
 
         <div className="bg-white rounded-2xl shadow-xl p-8 mb-8 border border-gray-200">
           <div className="text-center">
-            {/* Recording Mode Toggle */}
-            <div className="mb-6">
-              <div className="flex items-center justify-center mb-4">
-                <div className="flex bg-gray-100 rounded-lg p-1">
-                  <button
-                    onClick={() => setRecordingMode('continuous')}
-                    disabled={isRecording}
-                    className={`px-4 py-2 text-sm rounded-md transition-all ${
-                      recordingMode === 'continuous'
-                        ? 'bg-white text-blue-600 shadow-sm'
-                        : 'text-gray-600 hover:text-blue-600'
-                    } ${isRecording ? 'opacity-50 cursor-not-allowed' : ''}`}
-                  >
-                    Continuous (2 min)
-                  </button>
-                  <button
-                    onClick={() => setRecordingMode('push-to-talk')}
-                    disabled={isRecording}
-                    className={`px-4 py-2 text-sm rounded-md transition-all ${
-                      recordingMode === 'push-to-talk'
-                        ? 'bg-white text-blue-600 shadow-sm'
-                        : 'text-gray-600 hover:text-blue-600'
-                    } ${isRecording ? 'opacity-50 cursor-not-allowed' : ''}`}
-                  >
-                    Push-to-Talk (30s)
-                  </button>
-                </div>
-              </div>
-              <button
-                onClick={toggleRecording}
-                disabled={isProcessing}
-                className={`relative w-24 h-24 rounded-full font-bold text-white shadow-lg transition-all transform hover:scale-105 active:scale-95 disabled:opacity-50 disabled:transform-none ${isRecording ? 'bg-red-500 hover:bg-red-600 recording-pulse' : 'bg-primary hover:bg-primary/90'}`}>
-                {isRecording ? <MicOff className="h-8 w-8 mx-auto" /> : <Mic className="h-8 w-8 mx-auto" />}
-              </button>
-            </div>
-
+            <button
+              onClick={toggleRecording}
+              disabled={isProcessing}
+              className={`relative w-24 h-24 rounded-full font-bold text-white shadow-lg transition-all transform hover:scale-105 active:scale-95 disabled:opacity-50 disabled:transform-none ${isRecording ? 'bg-red-500 hover:bg-red-600 recording-pulse' : 'bg-primary hover:bg-primary/90'}`}>
+              {isRecording ? <MicOff className="h-8 w-8 mx-auto" /> : <Mic className="h-8 w-8 mx-auto" />}
+            </button>
             <div className="h-16">
-              {isRecording && (
-                <div className="space-y-2">
-                  <p className="text-red-600 font-medium animate-pulse flex items-center justify-center">
-                    🎤 Recording... {formatDuration(recordingDuration)}
-                  </p>
-                  <div className="w-64 mx-auto bg-gray-200 rounded-full h-2">
-                    <div 
-                      className="bg-red-500 h-2 rounded-full transition-all duration-100"
-                      style={{ width: `${getProgressPercentage()}%` }}
-                    ></div>
-                  </div>
-                  <p className="text-xs text-gray-500">
-                    Max {recordingMode === 'push-to-talk' ? '0:30' : '2:00'} {recordingMode === 'push-to-talk' ? 'seconds' : 'minutes'}
-                  </p>
-                </div>
-              )}
+              {isRecording && <p className="text-red-600 font-medium animate-pulse flex items-center justify-center">🎤 Recording...</p>}
               {isProcessing && <p className="text-blue-600 font-medium"><Activity className="inline h-4 w-4 animate-spin mr-2" />Processing your command...</p>}
-              {!isRecording && !isProcessing && (
-                <div className="space-y-1">
-                  <p className="text-gray-600">Click the microphone to start recording</p>
-                  <p className="text-xs text-gray-400">
-                    {recordingMode === 'continuous' 
-                      ? 'Continuous: 2min max • Pause-friendly • Natural speech patterns'
-                      : 'Push-to-talk: 30s max • Auto-stops on 2s silence'
-                    }
-                  </p>
-                </div>
-              )}
+              {!isRecording && !isProcessing && <p className="text-gray-600">Click the microphone to start recording</p>}
             </div>
-
-            {(finalTranscript || interimTranscript) && (
-              <div className="mt-6 p-4 bg-blue-50 rounded-lg border border-blue-200">
-                <p className="text-sm font-semibold text-blue-800 mb-2">Transcript:</p>
-                <p className="text-blue-700 text-lg">
-                  {finalTranscript}
-                  {interimTranscript && <span className="text-gray-500">{interimTranscript}</span>}
-                </p>
-              </div>
-            )}
           </div>
         </div>
 
