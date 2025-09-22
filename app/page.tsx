@@ -5,30 +5,63 @@ import { Mic, MicOff, Activity, History, Zap } from 'lucide-react'
 import { usePreRecordedTranscription } from '@/hooks/usePreRecordedTranscription'
 import { parseIntent } from '@/utils/intentParser'
 import { executeBrowserAction } from '@/utils/stagehandActions'
-import { ActionLog } from '@/types'
+import { ActionLog, AgentAction } from '@/types'
+import BrowserView from '@/components/BrowserView'
+import {
+  Panel,  
+  PanelGroup,
+  PanelResizeHandle,
+} from "react-resizable-panels"
 
 export default function Home() {
   const [actionLogs, setActionLogs] = useState<ActionLog[]>([])
   const [isProcessing, setIsProcessing] = useState(false)
+  const [clarificationQuestion, setClarificationQuestion] = useState('');
+  const [sessionViewUrl, setSessionViewUrl] = useState<string | null>(null);
 
   const openRouterApiKey = process.env.NEXT_PUBLIC_OPENROUTER_API_KEY;
+
+  useEffect(() => {
+    const fetchSession = async () => {
+      try {
+        const response = await fetch('/api/agent/session');
+        if (!response.ok) {
+          throw new Error(`Failed to fetch session: ${response.statusText}`);
+        }
+        const data = await response.json();
+        setSessionViewUrl(data.sessionViewUrl);
+      } catch (error) {
+        console.error(error);
+        // Optionally, set an error state to show in the UI
+      }
+    };
+
+    fetchSession();
+  }, []);
 
   const handleTranscription = useCallback(async (transcript: string) => {
     if (!transcript.trim()) return;
 
     const logId = addActionLog({ command: transcript, status: 'processing', result: 'Parsing intent...' });
     setIsProcessing(true);
+    setClarificationQuestion('');
 
     try {
       if (!openRouterApiKey) {
         throw new Error('OpenRouter API key not configured. Please add NEXT_PUBLIC_OPENROUTER_API_KEY to your .env.local file.');
       }
 
-      const intent = await parseIntent(transcript, openRouterApiKey);
-      updateActionLog(logId, { action: intent, result: 'Executing action...' });
-
-      const result = await executeBrowserAction(intent);
-      updateActionLog(logId, { status: 'success', result });
+      const agentAction = await parseIntent(transcript, openRouterApiKey);
+      
+      if (agentAction.action === 'clarify') {
+        updateActionLog(logId, { action: agentAction, status: 'success', result: 'Awaiting clarification from user.' });
+        setClarificationQuestion(agentAction.question || 'Could you be more specific?');
+      } else {
+        // It's a BrowserAction
+        updateActionLog(logId, { action: agentAction, result: 'Executing action...' });
+        const result = await executeBrowserAction(agentAction);
+        updateActionLog(logId, { status: 'success', result });
+      }
     } catch (error: any) {
       console.error('Error in voice processing pipeline:', error);
       let errorMessage = error.message || 'An unknown error occurred.';
@@ -73,6 +106,7 @@ export default function Home() {
     if (isRecording) {
       stopRecording();
     } else {
+      setClarificationQuestion('');
       startRecording();
     }
   };
@@ -101,103 +135,83 @@ export default function Home() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 p-4 sm:p-6 lg:p-8">
-      <div className="max-w-4xl mx-auto">
-        <div className="text-center mb-8">
-          <div className="flex items-center justify-center mb-4">
-            <div className="p-3 bg-primary/10 rounded-full mr-3">
-              <Mic className="h-8 w-8 text-primary" />
-            </div>
-            <h1 className="text-4xl font-bold text-gray-900">Project Aria</h1>
+    <div className="h-screen bg-gray-100 p-4">
+      <PanelGroup direction="horizontal" className="h-full">
+        <Panel defaultSize={60} minSize={20}>
+          <div className="flex flex-col h-full bg-white rounded-lg shadow-md">
+            <BrowserView viewUrl={sessionViewUrl} />
           </div>
-          <p className="text-lg text-gray-600 max-w-2xl mx-auto">
-            Voice-controlled browser automation agent. Speak your commands and watch them come to life.
-          </p>
-        </div>
-
-        <div className="bg-white rounded-2xl shadow-xl p-8 mb-8 border border-gray-200">
-          <div className="text-center">
-            <button
-              onClick={toggleRecording}
-              disabled={isProcessing}
-              className={`relative w-24 h-24 rounded-full font-bold text-white shadow-lg transition-all transform hover:scale-105 active:scale-95 disabled:opacity-50 disabled:transform-none ${isRecording ? 'bg-red-500 hover:bg-red-600 recording-pulse' : 'bg-primary hover:bg-primary/90'}`}>
-              {isRecording ? <MicOff className="h-8 w-8 mx-auto" /> : <Mic className="h-8 w-8 mx-auto" />}
-            </button>
-            <div className="h-16">
-              {isRecording && <p className="text-red-600 font-medium animate-pulse flex items-center justify-center">🎤 Recording...</p>}
-              {isProcessing && <p className="text-blue-600 font-medium"><Activity className="inline h-4 w-4 animate-spin mr-2" />Processing your command...</p>}
-              {!isRecording && !isProcessing && <p className="text-gray-600">Click the microphone to start recording</p>}
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white rounded-2xl shadow-xl border border-gray-200">
-          <div className="p-6 border-b border-gray-200">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center">
-                <History className="h-5 w-5 text-gray-600 mr-2" />
-                <h2 className="text-xl font-bold text-gray-900">Action History</h2>
+        </Panel>
+        <PanelResizeHandle className="w-2 bg-gray-200 hover:bg-primary/50 transition-colors rounded-md mx-1" />
+        <Panel defaultSize={40} minSize={20}>
+          <div className="flex flex-col h-full space-y-4 overflow-y-auto custom-scrollbar p-2">
+            <div className="text-center">
+              <div className="flex items-center justify-center mb-2">
+                <Mic className="h-6 w-6 text-primary mr-2" />
+                <h1 className="text-2xl font-bold text-gray-900">Project Aria</h1>
               </div>
-              {actionLogs.length > 0 && <button onClick={clearLogs} className="text-sm text-gray-500 hover:text-gray-700">Clear All</button>}
+              <p className="text-sm text-gray-600">
+                Voice-controlled browser agent.
+              </p>
             </div>
-          </div>
 
-          <div className="p-6">
-            <div className="space-y-3 max-h-80 overflow-y-auto custom-scrollbar">
-              {actionLogs.length === 0 ? (
-                <div className="text-center py-12">
-                  <Mic className="h-12 w-12 text-gray-300 mx-auto mb-4" />
-                  <p className="text-gray-500 text-lg">No voice commands yet</p>
-                  <p className="text-gray-400 text-sm mt-2">Start recording to see your command history here</p>
+            <div className="bg-white rounded-2xl shadow-lg p-6 border border-gray-200">
+              <div className="text-center">
+                <button
+                  onClick={toggleRecording}
+                  disabled={isProcessing}
+                  className={`relative w-20 h-20 rounded-full font-bold text-white shadow-md transition-all transform hover:scale-105 active:scale-95 disabled:opacity-50 disabled:transform-none ${isRecording ? 'bg-red-500 hover:bg-red-600 recording-pulse' : 'bg-primary hover:bg-primary/90'}`}>
+                  {isRecording ? <MicOff className="h-7 w-7 mx-auto" /> : <Mic className="h-7 w-7 mx-auto" />}
+                </button>
+                <div className="h-12 flex items-center justify-center">
+                  {isRecording && <p className="text-red-600 font-medium animate-pulse flex items-center justify-center">🎤 Recording...</p>}
+                  {isProcessing && <p className="text-blue-600 font-medium"><Activity className="inline h-4 w-4 animate-spin mr-2" />Processing...</p>}
+                  {clarificationQuestion && <p className="text-amber-600 font-medium">{clarificationQuestion}</p>}
+                  {!isRecording && !isProcessing && !clarificationQuestion && <p className="text-gray-600">Click to start recording</p>}
                 </div>
-              ) : (
-                actionLogs.map((log) => (
-                  <div key={log.id} className={`p-4 rounded-lg border transition-all ${getStatusColor(log.status)}`}>
-                    <div className="flex items-start justify-between">
-                      <div className="flex items-start space-x-3 flex-1">
-                        <div className="mt-0.5">{getStatusIcon(log.status)}</div>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center justify-between mb-1">
-                            <p className="text-sm font-medium truncate">{log.command}</p>
-                            <span className="text-xs opacity-75 ml-2 flex-shrink-0">{log.timestamp}</span>
+              </div>
+            </div>
+
+            <div className="bg-white rounded-2xl shadow-lg border border-gray-200 flex-grow flex flex-col">
+              <div className="p-4 border-b border-gray-200">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center">
+                    <History className="h-5 w-5 text-gray-600 mr-2" />
+                    <h2 className="text-lg font-bold text-gray-900">Action History</h2>
+                  </div>
+                  {actionLogs.length > 0 && <button onClick={clearLogs} className="text-xs text-gray-500 hover:text-gray-700">Clear</button>}
+                </div>
+              </div>
+
+              <div className="p-4 space-y-3 flex-grow overflow-y-auto custom-scrollbar">
+                {actionLogs.length === 0 ? (
+                  <div className="text-center py-10">
+                    <Mic className="h-10 w-10 text-gray-300 mx-auto mb-3" />
+                    <p className="text-gray-500">No commands yet</p>
+                  </div>
+                ) : (
+                  actionLogs.map((log) => (
+                    <div key={log.id} className={`p-3 rounded-lg border transition-all ${getStatusColor(log.status)}`}>
+                      <div className="flex items-start justify-between">
+                        <div className="flex items-start space-x-3 flex-1">
+                          <div className="mt-0.5">{getStatusIcon(log.status)}</div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center justify-between mb-1">
+                              <p className="text-sm font-medium truncate">{log.command}</p>
+                              <span className="text-xs opacity-75 ml-2 flex-shrink-0">{log.timestamp}</span>
+                            </div>
+                            {log.result && <p className="text-xs opacity-80 mt-1">{log.result}</p>}
                           </div>
-                          {log.result && <p className="text-xs opacity-80 mt-1">{log.result}</p>}
                         </div>
                       </div>
                     </div>
-                  </div>
-                ))
-              )}
+                  ))
+                )}
+              </div>
             </div>
           </div>
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-8">
-          <div className="bg-green-50 border border-green-200 rounded-lg p-6">
-            <h3 className="font-semibold text-green-800 mb-3 flex items-center">
-              <Zap className="h-4 w-4 mr-2" />Enhanced Speech Recognition
-            </h3>
-            <ul className="list-disc list-inside text-green-700 text-sm space-y-2">
-              <li><strong>🎯 Pause-Friendly:</strong> Natural speech pauses won't stop recording</li>
-              <li><strong>⏱️ Extended Duration:</strong> Up to 2 minutes continuous recording</li>
-              <li><strong>🔄 Smart Reconnection:</strong> Automatic keep-alive during long pauses</li>
-              <li><strong>🎙️ Two Modes:</strong> Continuous & Push-to-Talk options</li>
-            </ul>
-          </div>
-
-          <div className="bg-blue-50 border border-blue-200 rounded-lg p-6">
-            <h3 className="font-semibold text-blue-800 mb-3 flex items-center">
-              <Mic className="h-4 w-4 mr-2" />Try these complex commands:
-            </h3>
-            <ul className="list-disc list-inside text-blue-700 text-sm space-y-2">
-              <li>"Go to Wikipedia... <em>(pause to think)</em> ...and search for machine learning"</li>
-              <li>"Navigate to YouTube, find a tutorial about... <em>(pause)</em> ...React development"</li>
-              <li>"Please open Google and... <em>(long pause)</em> ...search for today's weather forecast"</li>
-              <li>"I want to go to Amazon... <em>(thinking pause)</em> ...and look for programming books"</li>
-            </ul>
-          </div>
-        </div>
-      </div>
+        </Panel>
+      </PanelGroup>
     </div>
   )
 }

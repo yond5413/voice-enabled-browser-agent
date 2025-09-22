@@ -1,71 +1,44 @@
 import { BrowserAction } from '@/types';
 
 /**
- * Executes a browser action based on the provided command.
- * This function directly manipulates the DOM and browser navigation.
+ * Executes a browser action by sending it to the backend API.
+ * This function NO LONGER directly manipulates the DOM.
  * 
  * @param action The BrowserAction object describing the action to perform.
- * @returns A promise that resolves with a string describing the result of the action.
+ * @returns A promise that resolves with a string describing the result from the backend.
  */
-export const executeBrowserAction = (action: BrowserAction): Promise<string> => {
-  return new Promise((resolve, reject) => {
-    try {
-      switch (action.action) {
-        case 'navigate':
-          if (!action.target) return reject('No navigation target specified.');
-          let url = action.target;
-          if (!url.startsWith('http')) {
-            url = `https://${url}`;
-          }
-          window.location.href = url;
-          resolve(`Navigated to ${action.target}`);
-          break;
+export const executeBrowserAction = async (action: BrowserAction): Promise<string> => {
+  try {
+    const response = await fetch('/api/agent/action', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(action),
+    });
 
-        case 'click':
-          if (!action.target) return reject('No click target specified.');
-          const clickElement = document.querySelector(action.target) as HTMLElement;
-          if (clickElement) {
-            clickElement.click();
-            resolve(`Clicked on element: ${action.target}`);
-          } else {
-            reject(`Element not found for selector: ${action.target}`);
-          }
-          break;
-
-        case 'type':
-          if (!action.target) return reject('No typing target specified.');
-          if (typeof action.value === 'undefined') return reject('No value specified for typing.');
-          
-          const typeElement = document.querySelector(action.target) as HTMLInputElement | HTMLTextAreaElement;
-          if (typeElement) {
-            typeElement.value = action.value;
-            // Dispatch events to ensure frameworks like React detect the change
-            typeElement.dispatchEvent(new Event('input', { bubbles: true }));
-            typeElement.dispatchEvent(new Event('change', { bubbles: true }));
-            resolve(`Typed "${action.value}" into element: ${action.target}`);
-          } else {
-            reject(`Element not found for selector: ${action.target}`);
-          }
-          break;
-
-        case 'extract':
-          if (!action.target) return reject('No extraction target specified.');
-          const extractElement = document.querySelector(action.target);
-          if (extractElement) {
-            const text = (extractElement as HTMLElement).innerText || extractElement.textContent || '';
-            const extractedText = text.trim().substring(0, 200);
-            resolve(`Extracted text: "${extractedText}..."`);
-          } else {
-            reject(`Element not found for selector: ${action.target}`);
-          }
-          break;
-
-        default:
-          reject('Unknown action type.');
+    if (!response.ok) {
+      const errorText = await response.text();
+      try {
+        const errorJson = JSON.parse(errorText);
+        throw new Error(errorJson.details || errorJson.error || `API request failed with status ${response.status}`);
+      } catch {
+        throw new Error(errorText || `API request failed with status ${response.status}`);
       }
-    } catch (error: any) {
-      console.error(`Error executing browser action '${action.action}':`, error);
-      reject(error.message || 'An unknown error occurred.');
     }
-  });
+
+    const resultText = await response.text();
+    let parsed: any;
+    try {
+      parsed = JSON.parse(resultText);
+    } catch {
+      throw new Error(resultText || 'Invalid JSON response from server');
+    }
+    return parsed.result || 'Action executed successfully.';
+
+  } catch (error: any) {
+    console.error(`Error executing browser action via API for '${action.action}':`, error);
+    // Re-throw the error to be caught by the calling function in page.tsx
+    throw error;
+  }
 };

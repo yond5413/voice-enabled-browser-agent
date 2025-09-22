@@ -9,7 +9,11 @@ export const metadata: Metadata = {
   description: 'A voice-controlled browser automation agent powered by Deepgram, OpenRouter, and Stagehand',
   keywords: ['voice control', 'browser automation', 'AI agent', 'speech-to-text'],
   authors: [{ name: 'Project Aria Team' }],
-  viewport: 'width=device-width, initial-scale=1',
+}
+
+export const viewport = {
+  width: 'device-width',
+  initialScale: 1,
 }
 
 export default function RootLayout({
