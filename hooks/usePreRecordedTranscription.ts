@@ -38,32 +38,21 @@ export const usePreRecordedTranscription = ({ onTranscription }: UsePreRecordedT
       mediaRecorderRef.current.onstop = async () => {
         const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' })
         audioChunksRef.current = []
-        
-        const deepgramApiKey = process.env.NEXT_PUBLIC_DEEPGRAM_API_KEY
-        if (!deepgramApiKey) {
-          console.error("Deepgram API key is not defined.")
-          return
-        }
 
         try {
-          const response = await fetch('https://api.deepgram.com/v1/listen', {
+          const response = await fetch('/api/agent/transcribe', {
             method: 'POST',
-            headers: {
-              'Authorization': `Token ${deepgramApiKey}`,
-              'Content-Type': 'audio/webm'
-            },
             body: audioBlob
           })
 
           if (!response.ok) {
-            throw new Error(`Deepgram API request failed with status ${response.status}`)
+            throw new Error(`Transcription API request failed with status ${response.status}`)
           }
 
           const result = await response.json()
-          const transcript = result.results.channels[0].alternatives[0].transcript
-          onTranscription(transcript)
+          onTranscription(result.transcript)
         } catch (error) {
-          console.error('Error sending audio to Deepgram:', error)
+          console.error('Error sending audio for transcription:', error)
         }
       }
     }

@@ -36,7 +36,10 @@ export default function Home() {
       }
     };
 
-    fetchSession();
+    if (!(window as any).__fetchedSession__) {
+      (window as any).__fetchedSession__ = true;
+      fetchSession();
+    }
   }, []);
 
   const handleTranscription = useCallback(async (transcript: string) => {
