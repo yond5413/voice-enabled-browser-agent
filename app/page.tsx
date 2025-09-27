@@ -3,10 +3,9 @@
 import { useState, useCallback, useEffect } from 'react'
 import { Mic, MicOff, Activity, History, Zap } from 'lucide-react'
 import { usePreRecordedTranscription } from '@/hooks/usePreRecordedTranscription'
-import { parseIntent } from '@/utils/intentParser'
-import { executeBrowserAction } from '@/utils/stagehandActions'
-import { ActionLog, AgentAction } from '@/types'
+import { ActionLog } from '@/types'
 import BrowserView from '@/components/BrowserView'
+import { generateId } from '@/utils/utils'
 import {
   Panel,  
   PanelGroup,
@@ -18,6 +17,7 @@ export default function Home() {
   const [isProcessing, setIsProcessing] = useState(false)
   const [clarificationQuestion, setClarificationQuestion] = useState('');
   const [sessionViewUrl, setSessionViewUrl] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null)
 
   const openRouterApiKey = process.env.NEXT_PUBLIC_OPENROUTER_API_KEY;
 
@@ -37,8 +37,19 @@ export default function Home() {
     };
 
     if (!(window as any).__fetchedSession__) {
-      (window as any).__fetchedSession__ = true;
-      fetchSession();
+      (window as any).__fetchedSession__ = true
+      // ensure a persistent session id per tab
+      try {
+        const existing = window.localStorage.getItem('agentSessionId')
+        const id = existing || generateId()
+        if (!existing) window.localStorage.setItem('agentSessionId', id)
+        setSessionId(id)
+      } catch {
+        // fallback if localStorage unavailable
+        const id = generateId()
+        setSessionId(id)
+      }
+      fetchSession()
     }
   }, []);
 
@@ -54,16 +65,27 @@ export default function Home() {
         throw new Error('OpenRouter API key not configured. Please add NEXT_PUBLIC_OPENROUTER_API_KEY to your .env.local file.');
       }
 
-      const agentAction = await parseIntent(transcript, openRouterApiKey);
-      
-      if (agentAction.action === 'clarify') {
-        updateActionLog(logId, { action: agentAction, status: 'success', result: 'Awaiting clarification from user.' });
-        setClarificationQuestion(agentAction.question || 'Could you be more specific?');
+      if (!sessionId) {
+        throw new Error('Session not ready. Please try again in a moment.')
+      }
+
+      const res = await fetch('/api/agent/converse', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId, transcript, openRouterApiKey })
+      })
+
+      if (!res.ok) {
+        const err = await res.text()
+        throw new Error(err || `Converse API error: ${res.status}`)
+      }
+
+      const data = await res.json()
+      if (data.type === 'clarify') {
+        updateActionLog(logId, { status: 'success', result: 'Awaiting clarification from user.' })
+        setClarificationQuestion(data.question || 'Could you be more specific?')
       } else {
-        // It's a BrowserAction
-        updateActionLog(logId, { action: agentAction, result: 'Executing action...' });
-        const result = await executeBrowserAction(agentAction);
-        updateActionLog(logId, { status: 'success', result });
+        updateActionLog(logId, { status: 'success', result: data.result || 'Action executed.' })
       }
     } catch (error: any) {
       console.error('Error in voice processing pipeline:', error);
@@ -82,7 +104,7 @@ export default function Home() {
     } finally {
       setIsProcessing(false);
     }
-  }, [openRouterApiKey]);
+  }, [openRouterApiKey, sessionId]);
 
   const { 
     isRecording,

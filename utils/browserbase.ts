@@ -2,6 +2,7 @@ import { Stagehand } from "@browserbasehq/stagehand";
 import { z } from "zod";
 import { BrowserAction } from "@/types";
 import { globalModelFallback, ModelConfig } from "./modelConfig";
+import { sleep, getAgentMemory } from "./utils";
 
 declare global {
   // eslint-disable-next-line no-var
@@ -13,6 +14,8 @@ declare global {
     initPromise: Promise<void> | null;
     currentModel: ModelConfig | null;
     lastError: Error | null;
+    lastKnownUrl?: string | null;
+    lastKnownTitle?: string | null;
   } | undefined;
 }
 
@@ -39,6 +42,8 @@ const store = (globalThis as any).__stagehandStore__ ?? ((globalThis as any).__s
   initPromise: null,
   currentModel: null,
   lastError: null,
+  lastKnownUrl: null,
+  lastKnownTitle: null,
 });
 
 function createStagehandForModel(model: ModelConfig, useProxies: boolean): Stagehand {
@@ -182,7 +187,16 @@ async function initialize(): Promise<void> {
 export const Browser = {
   async getPage() {
     await initialize();
-    return ensureStagehand().page;
+    const page = ensureStagehand().page;
+    // Ensure landing on Google for stable starting context
+    if (!store.lastKnownUrl) {
+      try {
+        await this.ensureGoogleHome(page);
+      } catch (e) {
+        console.warn("Failed to ensure Google home:", (e as any)?.message);
+      }
+    }
+    return page;
   },
 
   async executeAction(action: BrowserAction): Promise<string> {
@@ -195,9 +209,66 @@ export const Browser = {
         
         switch (action.action) {
           case "navigate":
-            await page.goto(action.target);
+            if (/^https?:\/\//i.test(action.target)) {
+              await page.goto(action.target);
+            } else if (action.target.includes('google.com/search?q=')) {
+              // legacy intent may produce full search URL; go directly
+              await page.goto(action.target);
+            } else if (/^google\s/i.test(action.target) || /\bsearch\b/i.test(action.target)) {
+              await page.goto("https://www.google.com");
+              await this.addHumanDelay(800, 1600);
+              try {
+                const fields = await page.observe("Find the main Google search input field");
+                if (fields && fields.length > 0) {
+                  const query = action.target.replace(/^google\s*/i, '').trim();
+                  await page.act({
+                    action: "Click on the search input and then type %q%",
+                    variables: { q: query || action.target },
+                    domSettleTimeoutMs: 30000,
+                  });
+                  await this.addHumanDelay(600, 1400);
+                  await page.act("press Enter to submit the search");
+                } else {
+                  await page.act({ action: "type %q% into the search box", variables: { q: action.target } });
+                  await page.act("press Enter to submit the search");
+                }
+                // Scroll a bit to look human and reveal results
+                await this.addHumanDelay(800, 1600);
+                await page.act("scroll down a little");
+              } catch (e) {
+                await page.goto(`https://www.google.com/search?q=${encodeURIComponent(action.target)}`);
+              }
+            } else if (/^www\.|^google\./i.test(action.target)) {
+              await page.goto(`https://${action.target}`);
+            } else {
+              // Treat any non-URL as a Google query for robustness
+              await page.goto("https://www.google.com");
+              await this.addHumanDelay(600, 1400);
+              try {
+                const fields = await page.observe("Find the main Google search input field");
+                const query = action.target.trim();
+                if (fields && fields.length > 0) {
+                  await page.act({
+                    action: "Click on the search input and then type %q%",
+                    variables: { q: query },
+                    domSettleTimeoutMs: 30000,
+                  });
+                } else {
+                  await page.act({ action: "type %q% into the search box", variables: { q: query } });
+                }
+                await this.addHumanDelay(500, 1200);
+                await page.act("press Enter to submit the search");
+              } catch (e) {
+                await page.goto(`https://www.google.com/search?q=${encodeURIComponent(action.target)}`);
+              }
+            }
             // Wait for page to fully load and settle
             await page.act("wait for the page to fully load");
+            await this.addHumanDelay(600, 1400);
+            // minor scroll to reduce bot heuristics
+            try { await page.act("scroll down slightly"); } catch {}
+            // Update page context in memory
+            try { await this.updatePageContext(page); } catch {}
             return `Navigated to ${action.target}`;
             
           case "click":
@@ -285,6 +356,7 @@ export const Browser = {
               domSettleTimeoutMs: 30000,
             });
             
+            try { await this.updatePageContext(page); } catch {}
             return `Extracted data: ${JSON.stringify(data)}`;
             
           default:
@@ -298,6 +370,15 @@ export const Browser = {
           store.stagehand = null;
           store.session = null;
           store.isInitialized = false;
+        }
+        // If Google flagged as bot, try recoveries
+        const msg = (error?.message || '').toLowerCase();
+        if (msg.includes('unusual traffic') || msg.includes('captcha') || msg.includes('bot')) {
+          try {
+            await this.addHumanDelay(1200, 2200);
+            await page.act("scroll up and down slowly");
+            await this.addHumanDelay(1000, 1800);
+          } catch {}
         }
         throw error;
       }
@@ -322,6 +403,50 @@ export const Browser = {
   async addHumanDelay(minMs: number = 300, maxMs: number = 1000): Promise<void> {
     const delay = Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
     await new Promise(resolve => setTimeout(resolve, delay));
+  },
+
+  async ensureGoogleHome(page?: any): Promise<void> {
+    const p = page || (await this.getPage());
+    try {
+      await p.goto("https://www.google.com/ncr");
+      await this.addHumanDelay(600, 1200);
+      // Handle consent if present
+      try {
+        const buttons = await p.observe("Find a button like 'I agree' or 'Accept all' on the consent dialog if present");
+        if (buttons && buttons.length > 0) {
+          await this.addHumanDelay(400, 900);
+          await p.act(buttons[0]);
+          await this.addHumanDelay(500, 1100);
+        }
+      } catch {}
+      try { await p.act("wait for the page to fully load"); } catch {}
+      try { await p.act("scroll down slightly"); } catch {}
+      await this.updatePageContext(p);
+      const mem = getAgentMemory();
+      mem.add({ transcript: 'Initialized session at Google', url: store.lastKnownUrl || undefined, resultSummary: 'Ready on Google homepage' });
+    } catch (e) {
+      console.warn("ensureGoogleHome failed:", (e as any)?.message);
+    }
+  },
+
+  async updatePageContext(page?: any): Promise<void> {
+    const p = page || (await this.getPage());
+    try {
+      const info = await p.extract({
+        instruction: "Return the current page URL and title from the browser",
+        schema: z.object({ url: z.string().describe("current URL"), title: z.string().describe("page title") }),
+        domSettleTimeoutMs: 8000,
+      });
+      if (info && typeof info.url === "string") store.lastKnownUrl = info.url;
+      if (info && typeof info.title === "string") store.lastKnownTitle = info.title;
+    } catch {}
+  },
+
+  async getCurrentContext(): Promise<{ url?: string | null; title?: string | null }> {
+    if (!store.lastKnownUrl || !store.lastKnownTitle) {
+      try { await this.updatePageContext(); } catch {}
+    }
+    return { url: store.lastKnownUrl, title: store.lastKnownTitle };
   },
 
   async getSessionViewUrl(): Promise<string> {

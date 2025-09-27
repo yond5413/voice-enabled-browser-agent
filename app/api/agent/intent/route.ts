@@ -1,7 +1,8 @@
 import { type NextRequest } from 'next/server'
 import { globalModelFallback, ModelConfig } from '@/utils/modelConfig'
-import { getAgentMemory, summarizeForPrompt } from '@/utils/utils'
 import { Browser } from '@/utils/browserbase'
+
+export const runtime = 'nodejs'
 
 export async function POST (request: NextRequest) {
   const { transcript, openRouterApiKey } = await request.json()
@@ -11,8 +12,7 @@ export async function POST (request: NextRequest) {
   }
 
   try {
-    const mem = getAgentMemory()
-    const context = summarizeForPrompt(mem.getRecent(6))
+    const context = ''
     let location = ''
     try {
       const here = await Browser.getCurrentContext()
@@ -108,12 +108,7 @@ RESPOND WITH ONLY THE JSON ACTION FOR: "${transcript}"`
       console.log(`✅ ${model.displayName} successfully parsed intent`)
       
       // Store transcript and parsed action in memory for future context
-      try {
-        JSON.parse(jsonContent)
-        mem.add({ transcript, parsedAction: JSON.parse(jsonContent) })
-      } catch {
-        mem.add({ transcript })
-      }
+      try { JSON.parse(jsonContent) } catch {}
 
       return jsonContent
     })

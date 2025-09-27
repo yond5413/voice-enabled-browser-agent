@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { BrowserAction } from '@/types';
 import { Browser } from '@/utils/browserbase';
+import { getAgentMemory } from '@/utils/utils';
 
 export const runtime = 'nodejs';
 
@@ -17,6 +18,14 @@ export async function POST(request: Request) {
     }
 
     const result = await Browser.executeAction(action);
+
+    // Log to memory for downstream intent context
+    try {
+      const mem = getAgentMemory()
+      let url: string | undefined
+      try { url = await Browser.getSessionViewUrl() } catch {}
+      mem.add({ transcript: `Action: ${action.action} → ${action.target}`, parsedAction: action, resultSummary: result, url })
+    } catch {}
 
     return NextResponse.json({ result });
 
