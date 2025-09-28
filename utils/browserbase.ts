@@ -20,9 +20,13 @@ declare global {
 }
 
 const SESSION_CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
-const shouldUseProxiesByDefault = process.env.BROWSERBASE_USE_PROXIES === "true";
+const shouldUseProxiesByDefault = process.env.BROWSERBASE_USE_PROXIES
+  ? process.env.BROWSERBASE_USE_PROXIES === "true"
+  : true; // default to proxies enabled (plan supports proxies)
 const preferredRegion = process.env.BROWSERBASE_REGION;
-const keepAliveEnabled = process.env.BROWSERBASE_KEEP_ALIVE === "true";
+const keepAliveEnabled = process.env.BROWSERBASE_KEEP_ALIVE
+  ? process.env.BROWSERBASE_KEEP_ALIVE === "true"
+  : true; // default to keepAlive enabled for longer sessions
 const envOs = process.env.BROWSERBASE_OS;
 const advancedStealthEnabled = process.env.BROWSERBASE_ADVANCED_STEALTH === "true";
 let resolvedOs = envOs || "linux"; // Basic stealth supports Linux only
@@ -59,6 +63,7 @@ function createStagehandForModel(model: ModelConfig, useProxies: boolean): Stage
     browserSettings: {
       solveCaptchas: true,
       advancedStealth: advancedStealthEnabled,
+      blockAds: true,
       os: resolvedOs,
       viewport: {
         width: 1920,

@@ -133,3 +133,33 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ---
 
 **Project Aria** - Bringing voice control to web automation 🎤✨
+
+## Stagehand setup
+
+Add required Browserbase/OpenAI env vars to `.env.local`:
+
+```bash
+BROWSERBASE_API_KEY=your_browserbase_api_key
+BROWSERBASE_PROJECT_ID=your_project_id
+OPENAI_API_KEY=your_openai_key
+# Recommended defaults with upgraded plan
+BROWSERBASE_USE_PROXIES=true
+BROWSERBASE_KEEP_ALIVE=true
+# Optional tuning
+BROWSERBASE_REGION=us-east
+BROWSERBASE_OS=linux
+# Advanced stealth is a Scale plan feature
+BROWSERBASE_ADVANCED_STEALTH=false
+```
+
+The backend initializes Stagehand in `utils/browserbase.ts`. All API routes set `export const runtime = 'nodejs'` to ensure server execution.
+
+### Gotchas (Stagehand v2.5.0)
+
+- The `Stagehand` constructor in `@browserbasehq/stagehand@2.5.0` does not accept a `headless` option on `ConstructorParams`. Do not pass it or TypeScript will raise TS2353. Use the Browserbase live view `debugUrl` for visibility.
+- Live view URL comes from the session as `debugUrl`. The helper `Browser.getSessionViewUrl()` exposes it and the UI renders it via `components/BrowserView.tsx`.
+- With proxies enabled, Google is less likely to flag traffic as bot. If a 402 occurs (plan limit), the code will retry without proxies. Control default via `BROWSERBASE_USE_PROXIES`.
+- Use `BROWSERBASE_KEEP_ALIVE=true` for longer-running sessions; monitor usage on your plan.
+- If `BROWSERBASE_OS` is not `linux` and `BROWSERBASE_ADVANCED_STEALTH` is false, the code forces `linux` to avoid incompatibilities.
+- Ensure `OPENAI_API_KEY`, `BROWSERBASE_API_KEY`, and `BROWSERBASE_PROJECT_ID` are set; initialization will throw otherwise.
+- Keep these routes on the Node.js runtime: `/api/agent/session`, `/api/agent/action`, `/api/agent/converse`, `/api/agent/intent`.
