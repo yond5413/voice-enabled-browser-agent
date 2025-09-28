@@ -3,6 +3,7 @@ import { z } from "zod";
 import { BrowserAction } from "@/types";
 import { globalModelFallback, ModelConfig } from "./modelConfig";
 import { sleep, getAgentMemory } from "./utils";
+import { addArtifact } from "./artifactsStore";
 
 declare global {
   // eslint-disable-next-line no-var
@@ -50,7 +51,11 @@ const store = (globalThis as any).__stagehandStore__ ?? ((globalThis as any).__s
   lastKnownTitle: null,
 });
 
-function createStagehandForModel(model: ModelConfig, useProxies: boolean): Stagehand {
+function createStagehandForModel(
+  model: ModelConfig,
+  useProxies: boolean,
+  opts?: { omitRegion?: boolean; keepAlive?: boolean }
+): Stagehand {
   const openaiKey = process.env.OPENAI_API_KEY;
   if (!process.env.BROWSERBASE_API_KEY || !process.env.BROWSERBASE_PROJECT_ID || !openaiKey) {
     throw new Error(
@@ -71,8 +76,12 @@ function createStagehandForModel(model: ModelConfig, useProxies: boolean): Stage
       },
     },
   };
-  if (preferredRegion) sessionParams.region = preferredRegion;
-  if (keepAliveEnabled) sessionParams.keepAlive = true;
+  if (preferredRegion && !opts?.omitRegion) sessionParams.region = preferredRegion;
+  if (typeof opts?.keepAlive === 'boolean') {
+    sessionParams.keepAlive = opts.keepAlive;
+  } else if (keepAliveEnabled) {
+    sessionParams.keepAlive = true;
+  }
 
   if (useProxies) {
     sessionParams.proxies = true;
@@ -89,7 +98,7 @@ function createStagehandForModel(model: ModelConfig, useProxies: boolean): Stage
     projectId: process.env.BROWSERBASE_PROJECT_ID,
     modelName: resolvedModelName,
    // headless: false,
-    domSettleTimeoutMs: 30000,
+    domSettleTimeoutMs: 45000,
     modelClientOptions: {
       apiKey: openaiKey,
     },
@@ -105,11 +114,8 @@ function ensureStagehand(): Stagehand {
     );
   }
 
-  const currentModel = store.currentModel || globalModelFallback.getCurrentModel();
-
   if (!store.stagehand) {
-    store.stagehand = createStagehandForModel(currentModel, shouldUseProxiesByDefault);
-    store.currentModel = currentModel;
+    throw new Error("Stagehand not initialized. Call initialize() first.");
   }
 
   return store.stagehand as Stagehand;
@@ -121,7 +127,40 @@ async function ensureStagehandWithFallback(): Promise<void> {
     let stagehand = createStagehandForModel(model, shouldUseProxiesByDefault);
 
     try {
-      const session = await stagehand.init();
+      // Retry init multiple times for transient CDP/connect issues with exponential backoff
+      let lastErr: any = null;
+      let session: any = null;
+      for (let attempt = 1; attempt <= 4; attempt++) {
+        try {
+          session = await stagehand.init();
+          break;
+        } catch (e: any) {
+          lastErr = e;
+          const msg = e?.message || '';
+          // Adjust strategy based on failure type/attempt
+          const isCdpOrTimeout = /connectOverCDP/i.test(msg) || /Timeout/i.test(msg);
+          const is402 = msg.includes('402') || msg.toLowerCase().includes('proxies are not included in the free plan');
+          if (shouldUseProxiesByDefault && (is402 || isCdpOrTimeout)) {
+            if (attempt === 1) {
+              console.warn(`Init attempt ${attempt} failed (${msg}). Retrying without proxies...`);
+              stagehand = createStagehandForModel(model, false);
+            } else if (attempt === 2) {
+              console.warn(`Init attempt ${attempt} failed (${msg}). Retrying without proxies and omitting region...`);
+              stagehand = createStagehandForModel(model, false, { omitRegion: true });
+            } else if (attempt === 3) {
+              console.warn(`Init attempt ${attempt} failed (${msg}). Retrying without proxies, no region, keepAlive=false...`);
+              stagehand = createStagehandForModel(model, false, { omitRegion: true, keepAlive: false });
+            } else {
+              console.warn(`Init attempt ${attempt} failed (${msg}). Retrying with minimal defaults...`);
+              stagehand = createStagehandForModel(model, false, { omitRegion: true, keepAlive: false });
+            }
+          } else {
+            console.warn(`Init attempt ${attempt} failed (${msg}). Retrying...`);
+          }
+          await sleep(800 * attempt);
+        }
+      }
+      if (!session) throw lastErr || new Error('Failed to initialize Stagehand');
       store.stagehand = stagehand;
       store.session = session;
       store.currentModel = model;
@@ -193,6 +232,14 @@ export const Browser = {
   async getPage() {
     await initialize();
     const page = ensureStagehand().page;
+    try {
+      if (typeof (page as any).setDefaultNavigationTimeout === 'function') {
+        (page as any).setDefaultNavigationTimeout(60000);
+      }
+      if (typeof (page as any).setDefaultTimeout === 'function') {
+        (page as any).setDefaultTimeout(60000);
+      }
+    } catch {}
     // Ensure landing on Google for stable starting context
     if (!store.lastKnownUrl) {
       try {
@@ -204,7 +251,7 @@ export const Browser = {
     return page;
   },
 
-  async executeAction(action: BrowserAction): Promise<string> {
+  async executeAction(action: BrowserAction & { sessionId?: string }): Promise<string> {
     return await globalModelFallback.tryWithFallback(async (model) => {
       const page = await this.getPage();
       
@@ -313,8 +360,18 @@ export const Browser = {
                   timeoutMs: 60000,
                 });
                 
-                // Add delay before potential enter/submit
-                await this.addHumanDelay(800, 2000);
+                // Add delay and optionally submit when it's a search field
+                await this.addHumanDelay(500, 1200);
+                if (/search/i.test(String(action.target))) {
+                  try { await page.act("press Enter to submit the search"); } catch {}
+                  await this.addHumanDelay(400, 1000);
+                  try {
+                    const buttons = await page.observe("Find the search submit button or magnifying glass icon to run the search");
+                    if (buttons && buttons.length > 0) {
+                      await page.act(buttons[0]);
+                    }
+                  } catch {}
+                }
                 return `Typed "${action.value}" in "${action.target}" using observed field`;
               }
             } catch (observeError) {
@@ -326,7 +383,23 @@ export const Browser = {
               action: `type "%searchText%" into the ${action.target}`,
               variables: { searchText: String(action.value ?? "") }
             });
+            if (/search/i.test(String(action.target))) {
+              try { await page.act("press Enter to submit the search"); } catch {}
+            }
             return `Typed "${action.value}" in "${action.target}"`;
+
+          case "press":
+            try {
+              const key = String(action.target || '').trim();
+              if (!key) throw new Error('No key provided to press');
+              // Prefer natural instruction to trigger correct element context
+              await page.act(`press the ${key} key`);
+              return `Pressed ${key}`;
+            } catch (e) {
+              // minimal fallback
+              await page.act("press Enter");
+              return `Pressed ${String(action.target || 'Enter')}`;
+            }
             
           case "extract":
             // Wait for dynamic content to load first
@@ -362,6 +435,8 @@ export const Browser = {
             });
             
             try { await this.updatePageContext(page); } catch {}
+            // Store extraction as artifact
+            try { if (action.sessionId) addArtifact(action.sessionId, { type: 'extraction', label: action.target, data }); } catch {}
             return `Extracted data: ${JSON.stringify(data)}`;
             
           default:
@@ -380,14 +455,26 @@ export const Browser = {
         const msg = (error?.message || '').toLowerCase();
         if (msg.includes('unusual traffic') || msg.includes('captcha') || msg.includes('bot')) {
           try {
-            await this.addHumanDelay(1200, 2200);
+            //await this.addHumanDelay(1200, 2200);
             await page.act("scroll up and down slowly");
-            await this.addHumanDelay(1000, 1800);
+            //await this.addHumanDelay(1000, 1800);
           } catch {}
         }
         throw error;
       }
     });
+  },
+
+  async captureScreenshot(sessionId?: string, label?: string): Promise<void> {
+    try {
+      const page = await this.getPage();
+      // Use Playwright's screenshot from Stagehand page
+      const buffer = await (page as any).screenshot({ fullPage: true });
+      const b64 = `data:image/png;base64,${Buffer.from(buffer).toString('base64')}`;
+      if (sessionId) addArtifact(sessionId, { type: 'screenshot', label: label || 'Screenshot', data: { image: b64 } });
+    } catch (e) {
+      console.warn('Screenshot capture failed:', (e as any)?.message);
+    }
   },
 
   isModelRelatedError(error: any): boolean {
@@ -413,15 +500,25 @@ export const Browser = {
   async ensureGoogleHome(page?: any): Promise<void> {
     const p = page || (await this.getPage());
     try {
-      await p.goto("https://www.google.com/ncr");
+      try {
+        // Prefer plain Google with English locale; wait for DOM readiness
+        await p.goto("https://www.google.com/?hl=en", { waitUntil: 'domcontentloaded', timeout: 45000 });
+      } catch {
+        // Fallback if NCR path fails in some regions
+        try {
+          await p.goto("https://www.google.com/ncr", { waitUntil: 'domcontentloaded', timeout: 45000 });
+        } catch {
+          await p.goto("https://www.google.com", { waitUntil: 'domcontentloaded', timeout: 45000 });
+        }
+      }
       await this.addHumanDelay(600, 1200);
       // Handle consent if present
       try {
         const buttons = await p.observe("Find a button like 'I agree' or 'Accept all' on the consent dialog if present");
         if (buttons && buttons.length > 0) {
-          await this.addHumanDelay(400, 900);
+          //await this.addHumanDelay(400, 900);
           await p.act(buttons[0]);
-          await this.addHumanDelay(500, 1100);
+          //await this.addHumanDelay(500, 1100);
         }
       } catch {}
       try { await p.act("wait for the page to fully load"); } catch {}
@@ -452,6 +549,43 @@ export const Browser = {
       try { await this.updatePageContext(); } catch {}
     }
     return { url: store.lastKnownUrl, title: store.lastKnownTitle };
+  },
+
+  async getTextualSnapshot(): Promise<string> {
+    const p = await this.getPage();
+    try {
+      const data = await p.extract({
+        instruction:
+          "Provide a compact textual snapshot of the visible page to help a non-vision model understand layout and intent. Include main purpose, key sections, and primary actions. Avoid code, selectors, or long lists.",
+        schema: z.object({
+          url: z.string().optional(),
+          title: z.string().optional(),
+          mainPurpose: z
+            .string()
+            .describe("A one-sentence description of what this page enables the user to do"),
+          keySections: z
+            .array(z.string())
+            .max(6)
+            .describe("Up to 6 section titles or short descriptions in reading order"),
+          primaryActions: z
+            .array(z.string())
+            .max(6)
+            .describe("Up to 6 prominent buttons or links users are expected to click"),
+        }),
+        domSettleTimeoutMs: 8000,
+      });
+
+      const lines: string[] = [];
+      const header = [data?.title, data?.url].filter(Boolean).join(" | ");
+      if (header) lines.push(header);
+      if (data?.mainPurpose) lines.push(`Purpose: ${data.mainPurpose}`);
+      if (data?.keySections?.length) lines.push(`Sections: ${data.keySections.join(" • ")}`);
+      if (data?.primaryActions?.length) lines.push(`Primary actions: ${data.primaryActions.join(" • ")}`);
+      const out = lines.join("\n");
+      return typeof out === "string" ? out : "";
+    } catch {
+      return "";
+    }
   },
 
   async getSessionViewUrl(): Promise<string> {

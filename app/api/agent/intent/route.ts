@@ -1,23 +1,43 @@
 import { type NextRequest } from 'next/server'
 import { globalModelFallback, ModelConfig } from '@/utils/modelConfig'
 import { Browser } from '@/utils/browserbase'
+import { addArtifact } from '@/utils/artifactsStore'
+import { getAgentMemory, summarizeForPrompt } from '@/utils/utils'
+import { getSessionHistory } from '@/utils/sessionStore'
 
 export const runtime = 'nodejs'
 
 export async function POST (request: NextRequest) {
-  const { transcript, openRouterApiKey } = await request.json()
+  const { transcript, openRouterApiKey, sessionId } = await request.json()
 
   if (!openRouterApiKey) {
     return new Response('OpenRouter API key is not set.', { status: 500 })
   }
 
   try {
-    const context = ''
     let location = ''
+    let sessionHistoryBlock = ''
+  let snapshot = ''
+    // Proactively refresh page context via Stagehand extract to avoid stale state
+    try {
+      await (Browser as any).updatePageContext()
+    } catch {}
     try {
       const here = await Browser.getCurrentContext()
       if (here?.url || here?.title) {
         location = `CURRENT LOCATION: ${here.title || ''} | ${here.url || ''}`
+      }
+    } catch {}
+  try {
+    snapshot = await Browser.getTextualSnapshot()
+  } catch {}
+    try {
+      if (sessionId) {
+        const history = getSessionHistory(sessionId) || []
+        if (history.length > 0) {
+          const recent = history.slice(-8)
+          sessionHistoryBlock = `SESSION HISTORY (most recent last):\n${recent.map(h => `[${h.role}] ${h.content}`).join('\n')}`
+        }
       }
     } catch {}
     const result = await globalModelFallback.tryWithFallback(async (model: ModelConfig) => {
@@ -38,21 +58,27 @@ export async function POST (request: NextRequest) {
             content: `You are an intelligent web automation assistant. Convert voice commands into structured browser actions using natural, human-like interactions.
 
 RECENT CONTEXT (most recent last):
-${context || '(no prior context)'}
+${(() => { try { const mem = getAgentMemory(); return summarizeForPrompt(mem.getRecent(10)) || '(no prior context)' } catch { return '(no prior context)' } })()}
 
 ${location}
+
+${snapshot ? `PAGE SNAPSHOT:\n${snapshot}` : ''}
+
+${sessionHistoryBlock}
 
 COMMAND TO ANALYZE: "${transcript}"
 
 DECISION PROCESS:
 1. Direct navigation (specific websites): Use "navigate" action
 2. Search queries (questions, research, "find"): Use "navigate" to Google with natural search terms
-3. Page interactions (click, type, extract): Use appropriate action with descriptive, human-readable targets
-4. Ambiguous commands: Use "clarify" action
+3. Page interactions (click, type, extract, press): Use appropriate action with descriptive, human-readable targets
+4. Ambiguous commands: First ground your understanding in CURRENT LOCATION and PAGE SNAPSHOT. Only use "clarify" if ambiguity remains after considering visible context.
+5. If the intent requires multiple steps (e.g., navigate → type → press enter), return an action plan with an "actions" array in correct order.
 
 ACTION FORMATS:
-- BrowserAction: {"action": "navigate|click|type|extract", "target": "<human_readable_description_or_url>", "value": "<text_for_typing>"}
+- BrowserAction: {"action": "navigate|click|type|extract|press", "target": "<human_readable_description_or_url_or_key>", "value": "<text_for_typing>"}
 - ClarifyAction: {"action": "clarify", "question": "<specific_question>"}
+- ActionPlan: {"actions": [BrowserAction, ...]}
 
 SEARCH STRATEGY:
 For search queries, DO NOT return a direct Google search URL. Instead, return a navigate action whose target is a natural query prefixed with the word "google". The executor will open Google and type it like a human.
@@ -80,6 +106,14 @@ Page Interaction:
 Command: "Type 'machine learning' in the search box"
 Response: {"action": "type", "target": "search box", "value": "machine learning"}
 
+Multi-step Plan:
+Command: "On Amazon, search for wireless headphones"
+Response: {"actions": [
+  {"action": "navigate", "target": "https://www.amazon.com"},
+  {"action": "type", "target": "search box at top of page", "value": "wireless headphones"},
+  {"action": "press", "target": "Enter"}
+]}
+
 Extraction:
 Command: "Get the main headline from this page"
 Response: {"action": "extract", "target": "main headline or title"}
@@ -88,7 +122,11 @@ Clarification:
 Command: "Click it"
 Response: {"action": "clarify", "question": "What specifically would you like me to click? Please describe the button, link, or element."}
 
-RESPOND WITH ONLY THE JSON ACTION FOR: "${transcript}"`
+RESPOND WITH ONLY ONE OF:
+- a single action object, or
+- an object with an "actions" array (multi-step plan)
+
+FOR: "${transcript}"`
           }]
         })
       })
@@ -107,8 +145,13 @@ RESPOND WITH ONLY THE JSON ACTION FOR: "${transcript}"`
       const jsonContent = content.replace(/```json\n|```/g, '').trim()
       console.log(`✅ ${model.displayName} successfully parsed intent`)
       
-      // Store transcript and parsed action in memory for future context
-      try { JSON.parse(jsonContent) } catch {}
+      // Store transcript and parsed action as artifact
+      try {
+        const parsed = JSON.parse(jsonContent)
+        if (sessionId) {
+          addArtifact(sessionId, { type: 'intent', label: 'Parsed Intent', data: { transcript, action: parsed } })
+        }
+      } catch {}
 
       return jsonContent
     })

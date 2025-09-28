@@ -140,6 +140,23 @@ export default function Home() {
     setActionLogs([]);
   };
 
+  
+
+  const exportSummary = useCallback(async () => {
+    if (!sessionId) return
+    const res = await fetch(`/api/agent/session/export?sessionId=${encodeURIComponent(sessionId)}&format=html`)
+    if (!res.ok) return
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `session-${sessionId}-summary.html`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  }, [sessionId])
+
 
   const getStatusColor = (status: ActionLog['status']) => {
     switch (status) {
@@ -188,10 +205,12 @@ export default function Home() {
                   className={`relative w-20 h-20 rounded-full font-bold text-white shadow-md transition-all transform hover:scale-105 active:scale-95 disabled:opacity-50 disabled:transform-none ${isRecording ? 'bg-red-500 hover:bg-red-600 recording-pulse' : 'bg-primary hover:bg-primary/90'}`}>
                   {isRecording ? <MicOff className="h-7 w-7 mx-auto" /> : <Mic className="h-7 w-7 mx-auto" />}
                 </button>
-                <div className="h-12 flex items-center justify-center">
-                  {isRecording && <p className="text-red-600 font-medium animate-pulse flex items-center justify-center">🎤 Recording...</p>}
+                <div className="min-h-[3rem] px-3 py-2 text-center max-h-32 overflow-y-auto custom-scrollbar">
+                  {isRecording && <p className="text-red-600 font-medium animate-pulse inline-flex items-center justify-center">🎤 Recording...</p>}
                   {isProcessing && <p className="text-blue-600 font-medium"><Activity className="inline h-4 w-4 animate-spin mr-2" />Processing...</p>}
-                  {clarificationQuestion && <p className="text-amber-600 font-medium">{clarificationQuestion}</p>}
+                  {clarificationQuestion && (
+                    <p className="inline-block bg-amber-50 border border-amber-200 text-amber-700 rounded-md px-3 py-2 text-sm whitespace-pre-wrap break-words text-left">{clarificationQuestion}</p>
+                  )}
                   {!isRecording && !isProcessing && !clarificationQuestion && <p className="text-gray-600">Click to start recording</p>}
                 </div>
               </div>
@@ -204,7 +223,10 @@ export default function Home() {
                     <History className="h-5 w-5 text-gray-600 mr-2" />
                     <h2 className="text-lg font-bold text-gray-900">Action History</h2>
                   </div>
-                  {actionLogs.length > 0 && <button onClick={clearLogs} className="text-xs text-gray-500 hover:text-gray-700">Clear</button>}
+                  <div className="flex items-center gap-3">
+                    <button onClick={exportSummary} disabled={!sessionId} className="text-xs text-primary hover:underline disabled:text-gray-300">Export Summary</button>
+                    {actionLogs.length > 0 && <button onClick={clearLogs} className="text-xs text-gray-500 hover:text-gray-700">Clear</button>}
+                  </div>
                 </div>
               </div>
 
@@ -222,10 +244,10 @@ export default function Home() {
                           <div className="mt-0.5">{getStatusIcon(log.status)}</div>
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center justify-between mb-1">
-                              <p className="text-sm font-medium truncate">{log.command}</p>
+                              <p className="text-sm font-medium whitespace-pre-wrap break-words pr-2">{log.command}</p>
                               <span className="text-xs opacity-75 ml-2 flex-shrink-0">{log.timestamp}</span>
                             </div>
-                            {log.result && <p className="text-xs opacity-80 mt-1">{log.result}</p>}
+                            {log.result && <p className="text-xs opacity-80 mt-1 whitespace-pre-wrap break-words">{log.result}</p>}
                           </div>
                         </div>
                       </div>

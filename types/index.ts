@@ -2,7 +2,7 @@
 
 // Represents an action that directly manipulates the browser
 export interface BrowserAction {
-  action: 'navigate' | 'click' | 'type' | 'extract';
+  action: 'navigate' | 'click' | 'type' | 'extract' | 'press';
   target: string;
   value?: string;
 }
@@ -15,6 +15,13 @@ export interface ClarifyAction {
 
 // A union of all possible actions the agent can decide on
 export type AgentAction = BrowserAction | ClarifyAction;
+
+// A plan of multiple actions to fulfill a single intent
+export interface ActionPlan {
+  actions: BrowserAction[];
+}
+
+export type AgentDecision = AgentAction | ActionPlan;
 
 export interface ActionLog {
   id: string;
